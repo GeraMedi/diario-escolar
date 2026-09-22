@@ -1,0 +1,5 @@
+node_modules/
+_test_salida.pdf
+_test_salida.docx
+.DS_Store
+Thumbs.db

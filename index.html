@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <title>Diario Escolar de Voz ✏️</title>
+  <meta name="description" content="Diario del maestro con voz: graba, transcribe y guarda lo que pasó en clase. Funciona sin internet." />
+  <meta name="theme-color" content="#ffd9e3" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Diario Voz" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ============ SPLASH SCREEN ============ -->
+  <div class="splash" id="splash">
+    <div class="splash-logo">✏️</div>
+    <div class="splash-name">Diario Escolar de Voz</div>
+    <div class="splash-sub">Tu cuaderno de clase, ahora de voz</div>
+    <div class="splash-loader"><span></span></div>
+  </div>
+
+  <!-- ============ DRAWER / MENÚ LATERAL ============ -->
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-label="Menú lateral">
+    <div class="drawer-head">
+      <div class="drawer-avatar">📒</div>
+      <div>
+        <strong>Mi Diario de Clase</strong>
+        <small>Edición voz · Docentes</small>
+      </div>
+    </div>
+
+    <button class="drawer-item" data-panel="panelExport">📤 Ajustes de exportación</button>
+    <section class="drawer-panel" id="panelExport" hidden>
+      <label class="radio">
+        <input type="radio" name="formato" value="pdf" checked />
+        <span>📄 PDF — hoja de cuaderno</span>
+      </label>
+      <label class="radio">
+        <input type="radio" name="formato" value="word" />
+        <span>📝 Word — documento .docx</span>
+      </label>
+      <button class="btn primary full" id="btnExportar">⬇️ Exportar día activo</button>
+    </section>
+
+    <button class="drawer-item" data-panel="panelHistorial">📚 Historial / Buscador</button>
+    <section class="drawer-panel" id="panelHistorial" hidden>
+      <input type="search" id="buscarHistorial" class="input" placeholder="🔍 Fecha, grupo o palabra…" />
+      <div id="listaHistorial" class="historial-lista"></div>
+    </section>
+
+    <button class="drawer-item" id="btnCompartirMenu">📲 Compartir nota del día</button>
+
+    <div class="drawer-foot">🔒 Todo se guarda solo en tu teléfono.<br />Sin login, sin servidor.</div>
+  </aside>
+
+  <!-- ============ APP ============ -->
+  <div class="app">
+    <header class="appbar">
+      <button class="icon-btn" id="btnMenu" aria-label="Abrir menú">☰</button>
+      <div class="appbar-title">📒 Mi Diario de Clase</div>
+      <button class="icon-btn" id="btnShareTop" aria-label="Compartir">↗️</button>
+    </header>
+
+    <main class="main">
+      <!-- Hoja de cuaderno -->
+      <section class="sheet" id="sheet">
+        <div class="tape"></div>
+
+        <div class="sheet-top">
+          <div class="dia-semana" id="diaSemana">Lunes</div>
+          <div class="fecha-larga" id="fechaLarga">21 de septiembre de 2026</div>
+          <div class="fecha-row">
+            <input type="date" id="fechaInput" class="mini-input" aria-label="Cambiar fecha" />
+            <select id="grupoSelect" class="mini-input grow" aria-label="Grupo o materia">
+              <option value="">🏫 Grupo / materia…</option>
+              <option value="1° A">1° A</option>
+              <option value="1° B">1° B</option>
+              <option value="2° A">2° A</option>
+              <option value="2° B">2° B</option>
+              <option value="3° A">3° A</option>
+              <option value="3° B">3° B</option>
+              <option value="4° A">4° A</option>
+              <option value="4° B">4° B</option>
+              <option value="5° A">5° A</option>
+              <option value="5° B">5° B</option>
+              <option value="6° A">6° A</option>
+              <option value="6° B">6° B</option>
+              <option value="__otro">✍️ Otro…</option>
+            </select>
+          </div>
+          <input type="text" id="grupoOtro" class="mini-input" hidden placeholder="Escribí el grupo / materia…" />
+        </div>
+
+        <div class="titulo-row">
+          <input class="nota-titulo" id="notaTitulo" placeholder="Título de la nota ✨ (se genera solo)" />
+          <button type="button" class="btn-editar" id="btnEditarNota" hidden
+            aria-label="Editar esta nota" title="Editar esta nota">✏️</button>
+        </div>
+        <div class="modo-pill" id="modoPill" hidden>👁️ Vista previa — tocá ✏️ para editar</div>
+
+        <div class="notas-clave" id="notasClave" aria-label="Notas clave detectadas"></div>
+
+        <textarea id="hojaTexto" class="hoja-texto"
+          placeholder="Tocá 🎙️ y contá cómo fue la clase… también podés escribir acá."></textarea>
+
+        <div class="sheet-foot">
+          <span id="pieHora">—</span>
+          <span class="firma">Diario del docente ✏️</span>
+        </div>
+      </section>
+
+      <!-- Notas guardadas del día -->
+      <section class="guardadas">
+        <div class="guardadas-head">
+          <h3>Notas del día <span class="count" id="countDia">0</span></h3>
+          <button class="btn tiny" id="btnNueva">➕ Nueva</button>
+        </div>
+        <div id="listaGuardadas" class="chips-guardadas">
+          <p class="vacio" id="vacioGuardadas">Todavía no guardaste notas hoy 🌱</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Barra de grabación -->
+    <div class="recordbar" id="recordbar">
+      <div class="rec-status">
+        <span class="rec-dot" id="recDot"></span>
+        <span class="rec-tiempo" id="recTiempo">00:00</span>
+        <span class="rec-texto" id="recTexto">Listo para grabar</span>
+      </div>
+      <div class="rec-controls">
+        <button class="rc-btn rc-mic" id="btnMic" aria-label="Grabar">🎤</button>
+        <button class="rc-btn" id="btnPausa" aria-label="Pausar" disabled>⏸️</button>
+        <button class="rc-btn" id="btnDetener" aria-label="Detener" disabled>⏹️</button>
+        <button class="rc-btn rc-save" id="btnGuardar" aria-label="Guardar">💾</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: ¿qué compartir? -->
+  <div class="modal" id="shareModal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+      <div class="modal-emoji">📲</div>
+      <h3 id="shareTitle">¿Qué querés compartir?</h3>
+      <button type="button" class="btn primary full" data-share="nota">📄 Solo la nota actual</button>
+      <button type="button" class="btn full" data-share="todo">📚 Todo el diario</button>
+      <button type="button" class="btn ghost full" data-share="cancel">✖️ Cancelar</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="exporters.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
