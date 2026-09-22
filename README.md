@@ -32,7 +32,8 @@ Funciona **sin internet** y **sin login**: todo se guarda en el teléfono.
 ├── icons/              # iconos 192 / 512 / maskable / apple-touch
 ├── make-icons.ps1      # regenera los íconos PNG
 ├── test-exporters.js   # valida PDF (xref) y DOCX (zip + CRC32)
-└── test-ids.js         # valida que existan los IDs del DOM
+├── test-smoke.js       # flujo completo del docente con jsdom
+└── test-voz.js         # lógica de voz: sin duplicados, pausas y reinicios
 ```
 
 ## 🧪 Tests
@@ -41,6 +42,7 @@ Funciona **sin internet** y **sin login**: todo se guarda en el teléfono.
 node test-exporters.js   # estructura PDF y DOCX (incluye multi-fecha)
 node test-ids.js         # IDs del DOM
 node test-smoke.js       # flujo completo con jsdom (requiere: npm i --no-save jsdom)
+node test-voz.js         # transcripción: no duplica, guardar pausa, reinicios
 ```
 
 ## 🚀 Subir a GitHub Pages

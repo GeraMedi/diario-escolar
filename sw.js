@@ -3,7 +3,7 @@
    Estrategia: Cache First con actualización en segundo plano
    ========================================================= */
 
-const CACHE = "ded-pwa-v1";
+const CACHE = "ded-pwa-v2";
 
 const ASSETS = [
   "./",

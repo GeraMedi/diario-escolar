@@ -50,8 +50,15 @@
     modo: "nueva", // nueva | vista | edicion  (vista = solo lectura)
     // voz
     voz: "inactivo", // inactivo | grabando | pausado
-    textoDef: "",
-    interim: "",
+    textoDef: "",          // texto consolidado (definitivo) de la sesión actual
+    interim: "",           // texto parcial aún no finalizado
+    consumidos: 0,         // resultados finales de la sesión ya consolidados (evita repetir)
+    ultimoFinal: "",       // transcript del último final consolidado (pista de continuidad)
+    reinicioPendiente: false, // el navegador reinició la sesión → verificar continuidad
+    sesionViva: false,     // hay una sesión de reconocimiento activa
+    ultimoPintado: "",     // última escritura nuestra en la hoja (detecta edición manual)
+    ultimoInicio: 0,       // cuándo arrancó la sesión actual (anti-rafaga de reinicios)
+    rachas: 0,             // reinicios rápidos consecutivos (backoff)
     segundos: 0,
     timerId: null,
     rec: null,
@@ -84,6 +91,35 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
   }
+
+  /* ================== SONIDOS DE GRABACIÓN ================== */
+  // Tres únicos momentos con sonido: iniciar, pausar y detener.
+  // Los reinicios automáticos del navegador NO suenan.
+  let audioCtx = null;
+  function tono(fIni, fFin, dur, vol = 0.06) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return; // jsdom / navegadores sin audio
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(fIni, t);
+      osc.frequency.linearRampToValueAtTime(fFin, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g);
+      g.connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.03);
+    } catch { /* sin audio disponible */ }
+  }
+  const sonidoIniciar = () => tono(660, 990, 0.16); // tono ascendente: empezar
+  const sonidoPausa = () => tono(760, 500, 0.18);   // tono descendente: pausa
+  const sonidoDetener = () => tono(560, 320, 0.26); // tono grave: fin
 
   /* ================== TÍTULO INTELIGENTE ================== */
   const RELLENO = /^(hoy|bueno|ehm|eh|miren|bueno|nada|as[ií]|la verdad|bueno pues|del grupo|de la clase|de los alumnos)[,\s]+/i;
@@ -378,6 +414,36 @@
   const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   /* ================== VOZ ================== */
+  const norm = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  // ¿El texto entrante ya está al final del consolidado? Evita duplicados
+  // evidentes. Solo aplica a frases de 2+ palabras o 12+ caracteres para no
+  // descartar repetimientos legítimos de una sola palabra.
+  function esRepetido(base, t) {
+    const x = norm(t);
+    if (!x) return false;
+    if (x.split(" ").length < 2 && x.length < 12) return false;
+    return norm(base).endsWith(x);
+  }
+
+  // Escribe base+interim en la hoja y recuerda QUÉ escribimos, para poder
+  // detectar después si el usuario editó el texto a mano.
+  function pintarHojaVoz() {
+    const ta = $("hojaTexto");
+    ta.value = (state.textoDef + state.interim).replace(/^\s+/, "");
+    state.ultimoPintado = ta.value;
+    autoGrow();
+    renderNotasClave();
+  }
+
+  // Dobra lo parcial (interim) en el texto definitivo usando SIEMPRE lo que
+  // muestra la hoja (así nunca se pisa una edición manual). Idempotente.
+  function consolidarPendiente() {
+    const visible = textoHoja().replace(/^\s+/, "").trim();
+    state.textoDef = visible ? visible + " " : "";
+    state.interim = "";
+  }
+
   function setupVoz() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
@@ -394,19 +460,54 @@
     rec.maxAlternatives = 1;
 
     rec.onresult = (ev) => {
+      if (!state.sesionViva) return;
+      const ta = $("hojaTexto");
+
+      // 1) Si el navegador reinició la sesión, verificar si la lista de
+      //    resultados continuó (Chrome la reutiliza) o empezó de cero (spec).
+      //    Así el texto viejo NUNCA se vuelve a consolidar: era la causa de
+      //    que las palabras y párrafos se repitieran una y otra vez.
+      if (state.reinicioPendiente) {
+        state.reinicioPendiente = false;
+        const previo = state.consumidos > 0 ? ev.results[state.consumidos - 1] : null;
+        const siguioIgual = previo && previo[0].transcript === state.ultimoFinal;
+        if (!siguioIgual) {
+          consolidarPendiente(); // lista nueva: conservar lo que ya se habló
+          state.consumidos = 0;
+          state.ultimoFinal = "";
+        }
+      }
+
+      // 2) ¿El usuario editó la hoja a mano mientras grababamos? Manda él.
+      if (ta.value !== state.ultimoPintado) {
+        const editado = ta.value.trim();
+        state.textoDef = editado ? editado + " " : "";
+        state.interim = "";
+        state.consumidos = Math.max(state.consumidos, ev.results.length);
+        const ultimo = state.consumidos > 0 ? ev.results[state.consumidos - 1] : null;
+        state.ultimoFinal = ultimo ? ultimo[0].transcript : "";
+      }
+
+      // 3) Consumimos SOLO los resultados nuevos (desde `consumidos`),
+      //    ignorando resultIndex: aunque el navegador re-emita eventos viejos,
+      //    no se agregan dos veces. Y los finales repetidos se filtran.
       let interim = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      for (let i = state.consumidos; i < ev.results.length; i++) {
         const res = ev.results[i];
         if (res.isFinal) {
-          state.textoDef += res[0].transcript + " ";
+          const crudo = res[0].transcript || "";
+          const t = crudo.trim();
+          if (t && !esRepetido(state.textoDef, t)) {
+            state.textoDef += (state.textoDef && !/\s$/.test(state.textoDef) ? " " : "") + t + " ";
+          }
+          state.ultimoFinal = crudo;
+          state.consumidos = i + 1;
         } else {
           interim += res[0].transcript;
         }
       }
       state.interim = interim;
-      $("hojaTexto").value = (state.textoDef + state.interim).trimStart();
-      autoGrow();
-      renderNotasClave();
+      pintarHojaVoz();
     };
 
     rec.onerror = (ev) => {
@@ -418,13 +519,35 @@
       } else if (ev.error === "network") {
         toast("⚠️ Sin red para reconocer voz (seguís pudiendo escribir)");
         detenerVoz();
+      } else if (ev.error === "audio-capture") {
+        // micrófono inutilizable: cortamos en vez de entrar en bucle
+        toast("🎙️ No se pudo usar el micrófono");
+        detenerVoz();
       }
+      // "aborted"/"no-speech": el navegador corta la sesión y onend decide.
     };
 
     rec.onend = () => {
-      // reiniciar si sigue en modo grabando (silencio largo)
+      state.sesionViva = false;
       if (state.voz === "grabando") {
-        try { rec.start(); } catch { /* ya arrancó */ }
+        // El navegador cortó la sesión (silencio largo, red inestable…).
+        // Se reinicia SIN sonido y con resguardo anti-ráfaga: si las cortadas
+        // se encadenan muy seguido, esperamos un poco en vez de hacer
+        // "apagar… empezar… apagar…" a lo loco.
+        const ahora = Date.now();
+        state.rachas = ahora - (state.ultimoInicio || 0) < 2500 ? state.rachas + 1 : 0;
+        const espera = state.rachas >= 3 ? Math.min(800 * (state.rachas - 2), 5000) : 0;
+        setTimeout(() => {
+          if (state.voz !== "grabando") return;
+          state.reinicioPendiente = true;
+          try {
+            state.rec.start();
+            state.sesionViva = true;
+            state.ultimoInicio = Date.now();
+          } catch { /* ya estaba iniciado */ }
+        }, espera);
+      } else if (state.voz === "pausado") {
+        consolidarPendiente(); // la sesión murió estando pausado
       }
     };
 
@@ -440,16 +563,25 @@
       toast("✍️ Escribí tu nota directamente en la hoja");
       return;
     }
-    if (state.voz === "inactivo") {
-      state.textoDef = textoHoja() ? textoHoja().trim() + " " : "";
-      state.interim = "";
-    }
+    if (state.voz !== "inactivo") return; // ya grabando o pausado
+    const previo = textoHoja().trim();
+    state.textoDef = previo ? previo + " " : "";
+    state.interim = "";
+    state.consumidos = 0;
+    state.ultimoFinal = "";
+    state.reinicioPendiente = false;
+    state.sesionViva = false;
     try {
       state.rec.start();
+      state.sesionViva = true;
+      state.ultimoInicio = Date.now();
+      state.rachas = 0;
+      state.ultimoPintado = textoHoja();
       state.voz = "grabando";
       arrancarTimer();
       actualizarUIVoz();
       $("recTexto").textContent = "Grabando… contá lo que pasó 🎧";
+      sonidoIniciar(); // ← único momento con sonido de "inicio"
       toast("🎙️ Escuchando…");
     } catch {
       toast("⚠️ No se pudo iniciar el micrófono");
@@ -458,36 +590,68 @@
 
   function pausarVoz() {
     if (state.voz !== "grabando") return;
-    try { state.rec.pause ? state.rec.pause() : state.rec.stop(); } catch {}
-    // guardar lo parcial como definitivo
-    state.textoDef = textoHoja() ? textoHoja().trim() + " " : state.textoDef;
-    state.interim = "";
+    let pausadaNativamente = false;
+    if (state.rec.pause) {
+      // Pausa nativa: la sesión sigue viva, no se consolida nada todavía
+      // (doblar el interim y luego recibir su final duplicaría el texto).
+      try { state.rec.pause(); pausadaNativamente = true; } catch {}
+    }
+    if (!pausadaNativamente) {
+      try { state.rec.stop(); } catch {}
+      state.sesionViva = false;
+      consolidarPendiente(); // dobla lo parcial en el definitivo
+      state.reinicioPendiente = true; // al reanudar: verificar continuidad
+      pintarHojaVoz();
+    }
     state.voz = "pausado";
     pararTimer();
     actualizarUIVoz();
     $("recTexto").textContent = "En pausa ⏸️";
     actualizarTituloAuto();
+    sonidoPausa(); // ← único momento con sonido de "pausa"
   }
 
   function reanudarVoz() {
     if (state.voz !== "pausado") return;
-    try {
-      if (state.rec.resume) state.rec.resume();
-      else state.rec.start();
+    if (state.modo === "vista") {
+      toast("✏️ Tocá el lápiz para editar esta nota");
+      return;
+    }
+    const listo = () => {
       state.voz = "grabando";
       arrancarTimer();
       actualizarUIVoz();
       $("recTexto").textContent = "Grabando… 🎧";
+      sonidoIniciar(); // retoma con el mismo tono de inicio
+    };
+    if (state.sesionViva && state.rec.resume) {
+      try { state.rec.resume(); listo(); return; } catch { /* cae a start */ }
+    }
+    state.reinicioPendiente = true;
+    try {
+      state.rec.start();
+      state.sesionViva = true;
+      state.ultimoInicio = Date.now();
+      state.rachas = 0;
+      listo();
     } catch {
       toast("⚠️ No se pudo reanudar");
     }
   }
 
   function detenerVoz() {
+    const estabaActiva = state.voz !== "inactivo";
     try { state.rec && state.rec.stop(); } catch {}
+    state.sesionViva = false;
     state.voz = "inactivo";
-    state.interim = "";
-    state.textoDef = textoHoja() ? textoHoja().trim() : "";
+    state.reinicioPendiente = false;
+    if (estabaActiva) {
+      consolidarPendiente();
+      pintarHojaVoz();
+      sonidoDetener(); // ← único momento con sonido de "fin"
+    }
+    state.consumidos = 0;
+    state.ultimoFinal = "";
     pararTimer();
     actualizarUIVoz();
     $("recTexto").textContent = "Detenido ✋ guardá tu nota";
@@ -525,6 +689,9 @@
 
   /* ================== GUARDAR / EDITAR ================== */
   function guardarNota() {
+    // Si está grabando, guardar PAUSA la grabación (no se sigue grabando
+    // sola detrás de la nota guardada). Con ✏️ + ▶️ se retoma donde estaba.
+    if (state.voz === "grabando") pausarVoz();
     if (state.modo === "vista") {
       toast("✏️ Estás en vista previa · tocá el lápiz para editar");
       return;
@@ -567,6 +734,9 @@
     state.tituloManual = false;
     state.textoDef = "";
     state.interim = "";
+    state.consumidos = 0;
+    state.ultimoFinal = "";
+    state.reinicioPendiente = false;
     state.segundos = 0;
     setModo("nueva");
     $("recTiempo").textContent = "00:00";
