@@ -52,9 +52,9 @@
     voz: "inactivo", // inactivo | grabando | pausado
     textoDef: "",          // texto consolidado (definitivo) de la sesión actual
     interim: "",           // texto parcial aún no finalizado
-    consumidos: 0,         // resultados finales de la sesión ya consolidados (evita repetir)
-    ultimoFinal: "",       // transcript del último final consolidado (pista de continuidad)
-    reinicioPendiente: false, // el navegador reinició la sesión → verificar continuidad
+    consumidos: 0,         // cuántos resultados de la lista ya se consumieron
+    huellas: [],           // huella normalizada de cada resultado consumido
+    ultimoAppend: 0,       // cuándo se agregó el último texto (anti-eco del recognizer)
     sesionViva: false,     // hay una sesión de reconocimiento activa
     ultimoPintado: "",     // última escritura nuestra en la hoja (detecta edición manual)
     ultimoInicio: 0,       // cuándo arrancó la sesión actual (anti-rafaga de reinicios)
@@ -416,14 +416,128 @@
   /* ================== VOZ ================== */
   const norm = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
 
-  // ¿El texto entrante ya está al final del consolidado? Evita duplicados
-  // evidentes. Solo aplica a frases de 2+ palabras o 12+ caracteres para no
-  // descartar repetimientos legítimos de una sola palabra.
+  // Clave de comparación: minúsculas, sin acentos, sin puntuación y con
+  // espacios simples. Así "¿Cómo andás, chicos!" == "como andas chicos".
+  function clave(s) {
+    return norm(s)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N} ]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // ¿La frase `x` aparece completa (por palabras) dentro de `base`?
+  // `margen` acota `base` a los últimos N caracteres (cola del texto).
+  function contiene(base, x, margen) {
+    if (!x || !base) return false;
+    const texto = margen ? base.slice(-margen) : base;
+    return new RegExp("(?:^| )" + reEsc(x) + "(?: |$)").test(texto);
+  }
+
+  // ¿El texto entrante YA está escrito al final del consolidado? Chrome/Android
+  // (bug conocido) devuelve la misma frase como 2 o 3 resultados finales
+  // distintos; acá se filtran. Las repeticiones legítimas de una palabra sola
+  // solo se filtran si llegaron inmediatamente después de haberla escrito.
   function esRepetido(base, t) {
-    const x = norm(t);
+    const x = clave(t);
     if (!x) return false;
-    if (x.split(" ").length < 2 && x.length < 12) return false;
-    return norm(base).endsWith(x);
+    const b = clave(base);
+    if (!b) return false;
+    if (!contiene(b, x, x.length + 24)) return false; // solo la cola
+    if (x.split(" ").length > 1 || x.length >= 12) return true;
+    return Date.now() - state.ultimoAppend < 3000; // eco inmediato del mic
+  }
+
+  // Si el final/interino viene "pegado" a lo ya escrito (Chrome re-entrega la
+  // frase completa aunque ya se consolidó su principio), devuelve cuántas
+  // palabras iniciales se superponen con el final del texto consolidado.
+  function palabrasSolapadas(base, t, min = 1) {
+    const pb = clave(base).split(" ").filter(Boolean);
+    const pt = clave(t).split(" ").filter(Boolean);
+    const max = Math.min(pb.length, pt.length);
+    for (let k = max; k >= min; k--) {
+      if (pb.slice(pb.length - k).join(" ") === pt.slice(0, k).join(" ")) return k;
+    }
+    return 0;
+  }
+
+  // Devuelve el texto sin el solape inicial con lo ya consolidado. Así, si el
+  // texto escrito termina en "buenos" y llega "buenos días chicos", solo se
+  // agrega "días chicos" → "buenos días chicos" (una sola vez).
+  function recortarSolape(t) {
+    const texto = String(t || "").trim();
+    const k = palabrasSolapadas(state.textoDef, texto, 1);
+    if (!k) return texto;
+    let cortadas = k;
+    return texto
+      .split(/\s+/)
+      .filter((p) => {
+        if (cortadas > 0 && clave(p)) { cortadas--; return false; }
+        return true;
+      })
+      .join(" ")
+      .trim();
+  }
+
+  // Única puerta de entrada de texto DEFINITIVO al diario: filtra vacíos,
+  // solapes y duplicados, y solo entonces concatena.
+  function agregarFinal(crudo) {
+    const original = String(crudo || "").trim();
+    if (!original) return;
+    let texto = recortarSolape(original);
+    if (!texto) {
+      // la frase entera ya estaba al final: es un eco del recognizer salvo que
+      // el usuario la esté diciendo de nuevo pasados unos segundos
+      if (esRepetido(state.textoDef, original)) return;
+      texto = original;
+    }
+    if (esRepetido(state.textoDef, texto)) return;
+    state.textoDef +=
+      (state.textoDef && !/\s$/.test(state.textoDef) ? " " : "") + texto + " ";
+    state.ultimoAppend = Date.now();
+  }
+
+  // Huella de los resultados ya consumidos: permite saber en el próximo evento
+  // si la lista que llega es la MISMA o si el navegador arrancó una nueva.
+  function reasignarHuellas(results, hasta) {
+    const n = Math.min(hasta === undefined ? results.length : hasta, results.length);
+    for (let i = 0; i < n; i++) {
+      const r = results[i];
+      state.huellas[i] = r.isFinal ? clave(r[0] && r[0].transcript) : null;
+    }
+    state.huellas.length = n;
+  }
+
+  // true = sigue llegando la misma lista (los finales ya consumidos coinciden).
+  // null intermedio = ese índice era un interino (puede cambiar, no cuenta).
+  function listaContinua(results) {
+    if (state.consumidos === 0) return true;
+    if (results.length < state.consumidos) return false; // lista más corta = nueva
+    for (let i = 0; i < state.consumidos; i++) {
+      const habia = state.huellas[i];
+      if (habia === undefined) return false; // nunca lo vimos: lista rara
+      if (habia === null) continue;          // era interino: puede cambiar
+      const r = results[i];
+      if (clave(r && r[0] && r[0].transcript) !== habia) return false;
+    }
+    return true;
+  }
+
+  // ¿El primer resultado sigue siendo el mismo de antes? Si sí, la lista es la
+  // vieja (Chrome la reutiliza al reiniciar) y NO hay que consumirla de nuevo.
+  function esListaVieja(results) {
+    if (!results.length || state.consumidos === 0) return false;
+    const habia = state.huellas[0];
+    const visto = clave(state.textoDef + " " + state.interim);
+    const actual = clave(results[0][0] && results[0][0].transcript);
+    if (!actual) return false;
+    if (habia === undefined) return false;
+    // o bien coincide con la huella del índice 0, o bien ese índice 0 era un
+    // interino que ya estaba a la vista en la hoja
+    return habia === actual || ((habia === null) && contiene(visto, actual));
   }
 
   // Escribe base+interim en la hoja y recuerda QUÉ escribimos, para poder
@@ -463,18 +577,19 @@
       if (!state.sesionViva) return;
       const ta = $("hojaTexto");
 
-      // 1) Si el navegador reinició la sesión, verificar si la lista de
-      //    resultados continuó (Chrome la reutiliza) o empezó de cero (spec).
-      //    Así el texto viejo NUNCA se vuelve a consolidar: era la causa de
-      //    que las palabras y párrafos se repitieran una y otra vez.
-      if (state.reinicioPendiente) {
-        state.reinicioPendiente = false;
-        const previo = state.consumidos > 0 ? ev.results[state.consumidos - 1] : null;
-        const siguioIgual = previo && previo[0].transcript === state.ultimoFinal;
-        if (!siguioIgual) {
-          consolidarPendiente(); // lista nueva: conservar lo que ya se habló
+      // 1) ¿Sigue llegando la MISMA lista de resultados? Cuando el navegador
+      //    corta y reinicia la sesión (silencio, red inestable…) puede entregar
+      //    una lista NUEVA (spec) o reutilizar la VIEJA (Chrome). Se decide por
+      //    huella de cada resultado ya consumido, nunca "a ojo":
+      //      · lista vieja  → NO se vuelve a consumir nada (evita duplicar).
+      //      · lista nueva  → se dobla lo parcial visible y se arranca de cero.
+      if (!listaContinua(ev.results)) {
+        if (esListaVieja(ev.results)) {
+          reasignarHuellas(ev.results); // misma lista, re-sincronizar huellas
+        } else {
+          consolidarPendiente(); // lo que ya se habló queda consolidado
           state.consumidos = 0;
-          state.ultimoFinal = "";
+          state.huellas = [];
         }
       }
 
@@ -484,26 +599,30 @@
         state.textoDef = editado ? editado + " " : "";
         state.interim = "";
         state.consumidos = Math.max(state.consumidos, ev.results.length);
-        const ultimo = state.consumidos > 0 ? ev.results[state.consumidos - 1] : null;
-        state.ultimoFinal = ultimo ? ultimo[0].transcript : "";
+        reasignarHuellas(ev.results, state.consumidos);
       }
 
-      // 3) Consumimos SOLO los resultados nuevos (desde `consumidos`),
-      //    ignorando resultIndex: aunque el navegador re-emita eventos viejos,
-      //    no se agregan dos veces. Y los finales repetidos se filtran.
+      // 3) Separación estricta final / interino:
+      //    · isFinal = true  → se consolida UNA vez (agregarFinal filtra
+      //      duplicados y solapes) y el índice consumido avanza para siempre.
+      //    · isFinal = false → NO se escribe al diario: el búfer temporal se
+      //      limpia en cada evento y solo se MUESTRA el último interino.
+      //      Concatenar todos los interinos acumulados era lo que hacía que
+      //      las palabras se repitieran 2 o 3 veces mientras hablabas.
       let interim = "";
       for (let i = state.consumidos; i < ev.results.length; i++) {
         const res = ev.results[i];
+        const crudo = (res[0] && res[0].transcript) || "";
         if (res.isFinal) {
-          const crudo = res[0].transcript || "";
-          const t = crudo.trim();
-          if (t && !esRepetido(state.textoDef, t)) {
-            state.textoDef += (state.textoDef && !/\s$/.test(state.textoDef) ? " " : "") + t + " ";
-          }
-          state.ultimoFinal = crudo;
+          state.huellas[i] = clave(crudo);
+          agregarFinal(crudo);
           state.consumidos = i + 1;
+          // lo parcial anterior quedó superado por este final: se descarta
+          interim = "";
         } else {
-          interim += res[0].transcript;
+          state.huellas[i] = null; // interino: puede cambiar o desaparecer
+          // gana el interino más reciente y sin el solape con lo ya escrito
+          interim = recortarSolape(crudo);
         }
       }
       state.interim = interim;
@@ -539,7 +658,6 @@
         const espera = state.rachas >= 3 ? Math.min(800 * (state.rachas - 2), 5000) : 0;
         setTimeout(() => {
           if (state.voz !== "grabando") return;
-          state.reinicioPendiente = true;
           try {
             state.rec.start();
             state.sesionViva = true;
@@ -568,8 +686,8 @@
     state.textoDef = previo ? previo + " " : "";
     state.interim = "";
     state.consumidos = 0;
-    state.ultimoFinal = "";
-    state.reinicioPendiente = false;
+    state.huellas = [];
+    state.ultimoAppend = 0;
     state.sesionViva = false;
     try {
       state.rec.start();
@@ -600,7 +718,6 @@
       try { state.rec.stop(); } catch {}
       state.sesionViva = false;
       consolidarPendiente(); // dobla lo parcial en el definitivo
-      state.reinicioPendiente = true; // al reanudar: verificar continuidad
       pintarHojaVoz();
     }
     state.voz = "pausado";
@@ -627,7 +744,6 @@
     if (state.sesionViva && state.rec.resume) {
       try { state.rec.resume(); listo(); return; } catch { /* cae a start */ }
     }
-    state.reinicioPendiente = true;
     try {
       state.rec.start();
       state.sesionViva = true;
@@ -644,14 +760,13 @@
     try { state.rec && state.rec.stop(); } catch {}
     state.sesionViva = false;
     state.voz = "inactivo";
-    state.reinicioPendiente = false;
     if (estabaActiva) {
       consolidarPendiente();
       pintarHojaVoz();
       sonidoDetener(); // ← único momento con sonido de "fin"
     }
     state.consumidos = 0;
-    state.ultimoFinal = "";
+    state.huellas = [];
     pararTimer();
     actualizarUIVoz();
     $("recTexto").textContent = "Detenido ✋ guardá tu nota";
@@ -735,8 +850,8 @@
     state.textoDef = "";
     state.interim = "";
     state.consumidos = 0;
-    state.ultimoFinal = "";
-    state.reinicioPendiente = false;
+    state.huellas = [];
+    state.ultimoAppend = 0;
     state.segundos = 0;
     setModo("nueva");
     $("recTiempo").textContent = "00:00";

@@ -228,6 +228,94 @@ const $ = (id) => document.getElementById(id);
   $("btnDetener").click();
   await sleep(20);
 
+  /* ---------- 10. ANDROID/CHROME: repite la MISMA palabra 2 o 3 veces ---------- */
+  $("btnNueva").click();
+  $("btnMic").click();
+  fire([mkRes("sí", true)]);
+  check("Una palabra sola se escribe una vez", ta.value === "sí ", "valor: '" + ta.value + "'");
+  fire([mkRes("sí", true), mkRes("sí", true)]); // el bug devuelve dos finales iguales
+  check("Palabra duplicada por el recognizer no repite", ta.value === "sí ", "valor: '" + ta.value + "'");
+  fire([mkRes("sí", true), mkRes("sí", true), mkRes("sí", true)]);
+  check("Palabra triplicada por el recognizer no repite", ta.value === "sí ", "valor: '" + ta.value + "'");
+
+  // misma patología con una frase completa
+  fire([
+    mkRes("sí", true), mkRes("sí", true), mkRes("sí", true),
+    mkRes("hoy trabajamos en equipo", true),
+  ]);
+  check("Frase nueva se agrega", ta.value === "sí hoy trabajamos en equipo ",
+    "valor: '" + ta.value + "'");
+  fire([
+    mkRes("sí", true), mkRes("sí", true), mkRes("sí", true),
+    mkRes("hoy trabajamos en equipo", true),
+    mkRes("hoy trabajamos en equipo", true),
+  ]);
+  check("Frase re-entregada no duplica", ta.value === "sí hoy trabajamos en equipo ",
+    "valor: '" + ta.value + "'");
+
+  /* ---------- 11. INTERINOS: búfer temporal sin acumular ---------- */
+  fire([
+    mkRes("sí", true), mkRes("sí", true), mkRes("sí", true),
+    mkRes("hoy trabajamos en equipo", true),
+    mkRes("hoy trabajamos en equipo", true),
+    mkRes("y la", false),
+    mkRes("y la próxima", false),
+    mkRes("y la próxima semana hay feria", false),
+  ]);
+  check("Se muestra SOLO el último interino (no se concatenan)",
+    ta.value === "sí hoy trabajamos en equipo y la próxima semana hay feria",
+    "valor: '" + ta.value + "'");
+  fire([
+    mkRes("sí", true), mkRes("sí", true), mkRes("sí", true),
+    mkRes("hoy trabajamos en equipo", true),
+    mkRes("hoy trabajamos en equipo", true),
+    mkRes("y la próxima semana hay feria", true),
+  ]);
+  check("El final del parcial se consolida una sola vez",
+    ta.value === "sí hoy trabajamos en equipo y la próxima semana hay feria ",
+    "valor: '" + ta.value + "'");
+  $("btnDetener").click();
+  await sleep(20);
+
+  /* ---------- 12. RE-ENTREGA DE LA FRASE COMPLETA con solape ---------- */
+  $("btnNueva").click();
+  $("btnMic").click();
+  fire([mkRes("buenos", true)]);
+  check("Primer final de la frase", ta.value === "buenos ", "valor: '" + ta.value + "'");
+  fire([mkRes("buenos", true), mkRes("buenos días chicos", false)]);
+  check("El interino repite lo ya escrito: se recorta en pantalla",
+    ta.value === "buenos días chicos", "valor: '" + ta.value + "'");
+  fire([mkRes("buenos", true), mkRes("buenos días chicos", true)]);
+  check("El final agrega solo lo nuevo (sin repetir 'buenos')",
+    ta.value === "buenos días chicos ", "valor: '" + ta.value + "'");
+  fire([mkRes("buenos", true), mkRes("buenos días chicos", true), mkRes("buenos días chicos", true)]);
+  check("La frase completa re-entregada no duplica",
+    ta.value === "buenos días chicos ", "valor: '" + ta.value + "'");
+
+  /* ---------- 13. REINICIO con lista vieja re-interpretada ---------- */
+  rec.started = false;
+  rec.onend(); // el navegador corta y reinicia solo
+  await sleep(20);
+  check("Se puede seguir grabando tras el corte", $("recDot").classList.contains("on"));
+  fire([
+    mkRes("buenos", true),
+    mkRes("buenos días chicos de la tarde", true), // viejo, re-interpretado
+    mkRes("buenos días chicos", true),
+    mkRes("y seguimos la clase", false),
+  ]);
+  check("Lista vieja re-interpretada NO se vuelve a consumir",
+    ta.value === "buenos días chicos y seguimos la clase", "valor: '" + ta.value + "'");
+  fire([
+    mkRes("buenos", true),
+    mkRes("buenos días chicos de la tarde", true),
+    mkRes("buenos días chicos", true),
+    mkRes("y seguimos la clase", true),
+  ]);
+  check("Y el nuevo final se consolida una sola vez",
+    ta.value === "buenos días chicos y seguimos la clase ", "valor: '" + ta.value + "'");
+  $("btnDetener").click();
+  await sleep(20);
+
   check("Sin errores durante la sesión", errores.length === 0, errores.join(" | "));
   console.log(failures === 0 ? "\nVOZ OK ✅" : `\n${failures} fallas ❌`);
   process.exit(failures ? 1 : 0);
